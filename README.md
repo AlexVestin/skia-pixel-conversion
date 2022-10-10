@@ -9,4 +9,5 @@ ninja -C out/Static
 
 cd ..
 make
+cmake .
 ```
