@@ -135,7 +135,6 @@ void rgb2yuv420p(uint8_t* rgb, uint8_t* yuv_buffer, uvec2 size) {
  
 const char* sksl = R"(  
 uniform float2 u_tex_size;
-
 uniform shader u_tex;
 
 float4 conversion_y = float4(0.25882352941, 0.50588235294, 0.09803921568, 0.06274509803);
