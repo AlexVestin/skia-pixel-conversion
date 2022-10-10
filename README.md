@@ -8,6 +8,6 @@ gn gen out/Static --args='is_debug=false is_official_build=true skia_use_system_
 ninja -C out/Static
 
 cd ..
-make
 cmake .
+make
 ```
