@@ -141,35 +141,34 @@ float4 conversion_y = float4(0.25882352941, 0.50588235294, 0.09803921568, 0.0627
 float4 conversion_u = float4(-0.14901960784, -0.29019607843, 0.43921568627, 0.50196078431);
 float4 conversion_v = float4(0.43921568627, -0.36862745098, -0.07058823529, 0.50196078431);
  
-int2 index_to_position(int index, int2 size, int m) {
-    return int2(int(mod(float(index * m), float(size.x))), (index * m / size.x) * m);
+float2 index_to_position(float index, float2 size, float m) {
+    return float2(mod(index * m, size.x), floor((index * m) / size.x) * m);
 }
  
-float4 main(float2 c) {
-    // TODO: why the 256
-    float ww = u_tex_size.x + u_tex_size.x / 2.0;
-    float2 coords = float2((c.x / 256.) * ww, (c.y / 256.) * u_tex_size.y);
-    int2 size = int2(u_tex_size.xy);
-    int index = int(coords.x) + int(coords.y) * size.x;
+float4 main(float2 coords) {
     
-    int ustart = size.x * size.y;
-    int vstart = (ustart + ustart / 4);
+    float2 size = float2(u_tex_size.xy);
+    float out_width = size.x + size.x / 2.;
+    float index = coords.x + (coords.y - 0.5) * out_width - 0.5;
+    
+    float ustart = size.x * size.y;
+    float vstart = (ustart + ustart / 4);
  
-    int2 position;
+    float2 position;
     float4 conv;    
  
     if (index < ustart) { 
-        position = index_to_position(index, size, 1);
+        position = index_to_position(index, size, 1.0);
         conv = conversion_y;
     } else if (index < vstart) { 
-        position = index_to_position(index - ustart, size, 2);
+        position = index_to_position(index - ustart, size, 2.0);
         conv = conversion_u;
     } else { 
-        position = index_to_position(index - vstart, size, 2);
+        position = index_to_position(index - vstart, size, 2.0);
         conv = conversion_v;
     }
- 
-    float4 color = u_tex.eval((float2(position) / float2(size)) * float2(256.));
+    
+    float4 color = u_tex.eval(position);
     return float4(dot(float4(color.rgb, 1.0), conv));
 }
 )";
@@ -209,11 +208,11 @@ sk_sp<SkSurface> MakeOnScreenGLSurface(sk_sp<GrDirectContext> dContext, int widt
     GrGLFramebufferInfo info;
     info.fFBOID = 0;
 
-    GrGLint sampleCnt;
-    glGetIntegerv(GL_SAMPLES, &sampleCnt);
+    GrGLint sampleCnt = 1;
+    // glGetIntegerv(GL_SAMPLES, &sampleCnt);
 
-    GrGLint stencil;
-    glGetIntegerv(GL_STENCIL_BITS, &stencil);
+    GrGLint stencil = 8;
+    // glGetIntegerv(GL_STENCIL_BITS, &stencil);
 
     if (!colorSpace) {
         colorSpace = SkColorSpace::MakeSRGB();
@@ -256,9 +255,11 @@ int main()
     GLFWwindow *window = glfwCreateWindow(width, height, "GLFW OpenGL", monitor, NULL);
     glfwMakeContextCurrent(window);
 
+    int out_width = width + width / 2;
+
     sk_sp<GrDirectContext> grContext = MakeGrContext();
     auto surfaceImageInfo = SkImageInfo::Make(
-        width + width / 2, 
+        out_width, 
         height, 
         kR8_unorm_SkColorType, 
         SkAlphaType::kPremul_SkAlphaType,
@@ -281,8 +282,8 @@ int main()
     uint8_t* image = (uint8_t*)malloc(width * height * 4);    
     for (int i = 0; i < width * height; i++) {
         image[i*4+0] = std::rand() % 255;
-        image[i*4+1] = std::rand() % 1;
-        image[i*4+2] = std::rand() % 1;
+        image[i*4+1] = std::rand() % 255;
+        image[i*4+2] = std::rand() % 255;
         image[i*4+3] = 255;
     }
 
@@ -314,7 +315,6 @@ int main()
     sk_sp<SkShader> imageShader = img->makeShader(SkSamplingOptions(SkFilterMode::kNearest));
     
     auto [effect, err] = SkRuntimeEffect::MakeForShader(SkString(sksl));
-
     
     std::cout << "Error: " << err.c_str() << std::endl;
     SkRuntimeEffect::ChildPtr children[] = { imageShader };
@@ -325,19 +325,29 @@ int main()
     sk_sp<SkData> uniformData = SkData::MakeWithCopy(&uniforms, sizeof(uniforms));
     paint.setShader( effect->makeShader(std::move(uniformData), { children, 1 }));
     
-    surface->getCanvas()->drawRect(SkRect::MakeLTRB(0, 0, width, height), paint);
+    canvas->drawPaint(paint);
     surface->flush();
-
 
     SkBitmap readBackBitmap;
     readBackBitmap.allocPixels(surfaceImageInfo);
     surface->readPixels(readBackBitmap, 0, 0);
     uint8_t* d = static_cast<uint8_t*>(readBackBitmap.getPixels());
 
-    for(int i = 0; i < 1024; i++) {
-        std::cout << i << ": ";
-        for(int j = 0; j < 4; j++) {
-            std::cout << "(" << +d[i * 4 + j] << " " << +yuv1[i * 4 + j] << " " << +yuv2[i * 4 + j] << ") ";
+    int nc = 1;
+    for(int i = 0; i < yuv_size / 4; i++) {
+        std::cout << i * 4 << ": ";
+
+        
+        for (int j = 0; j < 4; j++) {
+            int r = (i * 4 + j) * nc;
+            std::cout << "(" << +d[r] << " " << +yuv1[i * 4 + j] << " " << +yuv2[i * 4 + j] << ") ";
+            // std::cout << "Other values: " << +d[r + 0] << " " << +d[r + 1] << " " << +d[r + 2] << " " << +d[r + 3] << std::endl;
+            if (std::abs(d[r] - yuv1[i * 4 + j]) > 2 || std::abs(d[r] - yuv2[i * 4 + j]) > 2) {
+                
+                std::cout << "Other values: " << +d[r + 0] << " " << +d[r + 1] << " " << +d[r + 2] << " " << +d[r + 3] << std::endl;
+                std::cout << "Not close enough, exiting";
+                exit(1);
+            }
         }
         std::cout << std::endl;
     }
