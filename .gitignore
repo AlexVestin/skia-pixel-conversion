@@ -1,6 +1,6 @@
 glfw/
 skia/
-
+./main
 
 # Cmake
 CMakeLists.txt.user

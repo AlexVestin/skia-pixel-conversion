@@ -8,9 +8,7 @@ endif()
 set(CMAKE_CXX_FLAGS "-O3")
 
 # Set common sources
-set(SOURCES "main.cc"
-            "parse.cc"            
-)
+set(SOURCES "main.cc")
 
 add_subdirectory(glfw)
 add_executable(${PROJECT_NAME} ${SOURCES})

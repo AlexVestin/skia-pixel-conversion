@@ -25,7 +25,6 @@ using namespace std::chrono;
 #include <include/gpu/gl/GrGLTypes.h>
 #include <include/gpu/gl/GrGLInterface.h>
 
-#include "parse.h"
 #include <math.h>
 
 bool fullscreen = false;
@@ -97,7 +96,6 @@ uint8_t rgb2yuv_gpu(int index, uvec2 size, uint8_t* image) {
  
  
 void rgb2yuv420p(uint8_t* rgb, uint8_t* yuv_buffer, uvec2 size) {
-    // Pad to match the linesize
     uint32_t u_start = size.x * size.y;
  
     float s = size.x / 4.;
@@ -173,7 +171,7 @@ float4 main(float2 c) {
     }
  
     float4 color = u_tex.eval((float2(position) / float2(size)) * float2(256.));
-    return float4(coords.x / ww); //float4(dot(float4(color.rgb, 1.0), conv));
+    return float4(dot(float4(color.rgb, 1.0), conv));
 }
 )";
 
