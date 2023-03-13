@@ -1,0 +1,14 @@
+prefix=/Users/alexandervestin/clay/skia-pixel-conversion/encoding/build/dependencies/ffmpeg/../../out/encode
+exec_prefix=${prefix}
+libdir=/Users/alexandervestin/clay/skia-pixel-conversion/encoding/build/dependencies/ffmpeg/../../out/encode/lib
+includedir=/Users/alexandervestin/clay/skia-pixel-conversion/encoding/build/dependencies/ffmpeg/../../out/encode/include
+
+Name: libavformat
+Description: FFmpeg container format library
+Version: 59.34.101
+Requires: libavcodec >= 59.50.100, libavutil >= 57.39.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavformat -lm
+Libs.private: 
+Cflags: -I${includedir}

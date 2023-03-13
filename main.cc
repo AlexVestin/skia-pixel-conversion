@@ -8,7 +8,7 @@
 using namespace std::chrono;
 
 #include <GLFW/glfw3.h>
-
+#include <OpenGL/gl3.h>
 #include <include/core/SkSurface.h>
 #include <include/core/SkColorSpace.h>
 #include <include/core/SkCanvas.h>
@@ -16,6 +16,13 @@ using namespace std::chrono;
 #include <include/core/SkPath.h>
 #include <include/core/SkBitmap.h>
 #include <include/core/SkPixmap.h>
+#include <include/core/SkPicture.h>
+#include "modules/skparagraph/include/Paragraph.h"
+#include "modules/skparagraph/include/ParagraphBuilder.h"
+#include "modules/skparagraph/src/ParagraphBuilderImpl.h"
+#include "modules/skparagraph/src/ParagraphPainterImpl.h"
+#include "modules/skunicode/include/SkUnicode.h"
+#include <include/core/SkPictureRecorder.h>
 
 #include <include/effects/SkRuntimeEffect.h>
 
@@ -25,15 +32,26 @@ using namespace std::chrono;
 #include <include/gpu/gl/GrGLTypes.h>
 #include <include/gpu/gl/GrGLInterface.h>
 
+// skottie stuff
+#include "modules/skottie/include/Skottie.h"
+#include "modules/skottie/include/SkottieProperty.h"
+#include "modules/skottie/utils/SkottieUtils.h"
+#include "modules/skresources/include/SkResources.h"
+#include "include/utils/SkTextUtils.h"
+#include <filesystem>
+
 #include <math.h>
+
 
 bool fullscreen = false;
 int width = 1280;
 int height = 720;
 
+#include <map>
 #include <iostream>
 #include <inttypes.h>
 #include <cstdlib>
+#include <sstream>
  
 #define NR_COLORS 4
  
@@ -44,8 +62,15 @@ struct vec2 {
 };
 struct vec4 { 
     float x, y, z, w; 
+    vec4(): vec4(0.0) { }
     vec4(float v): x(v), y(v), z(v), w(v) { }
     vec4(float x, float y, float z, float w): x(x), y(y), z(z), w(w) { } 
+    vec4 operator /(float div) {
+        return vec4(x / div, y /div, z / div, w / div);
+    }
+    vec4 operator +(const vec4& other) {
+        return vec4(x + other.x,  y + other.y,  z + other.z,  w + other.w);
+    }
 };
  
 struct uvec2 { 
@@ -54,125 +79,6 @@ struct uvec2 {
     uvec2(uint32_t x, uint32_t y): x(x), y(y) { } 
 }; 
  
-const vec4 conversion_y = vec4(0.25882352941, 0.50588235294, 0.09803921568, 0.06274509803);
-const vec4 conversion_u = vec4(-0.14901960784, -0.29019607843, 0.43921568627, 0.50196078431);
-const vec4 conversion_v = vec4(0.43921568627, -0.36862745098, -0.07058823529, 0.50196078431);
- 
-uvec2 index_to_position(int index, uvec2 size, int m) {
-    return uvec2((index * m) % size.x, (index * m / size.x) * m);
-}
- 
-vec4 sample_index(uint8_t* data, int index) {
-    return vec4(data[index*4+0] / 255.f, data[index*4+1] / 255.f, data[index*4+2] / 255.f, data[index*4+3] / 255.f);
-}
- 
-float dot4fv(vec4 a, vec4 b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-}
- 
-uint8_t rgb2yuv_gpu(int index, uvec2 size, uint8_t* image) {
- 
-    int ustart = size.x * size.y;
-    int vstart = (ustart + ustart / 4);
- 
-    uvec2 position = uvec2(0);
-    vec4 conv = vec4(0.0);    
- 
-    if (index < ustart) { 
-        position = index_to_position(index, size, 1);
-        conv = conversion_y;
-    } else if (index < vstart) { 
-        position = index_to_position(index - ustart, size, 2);
-        conv = conversion_u;
-    } else { 
-        position = index_to_position(index - vstart, size, 2);
-        conv = conversion_v;
-    }
- 
-    vec4 color = sample_index(image, position.x + position.y * size.x);
-    // When using GL_RED (8bit color size) gl_FragColor is still a vec4, but gba components are ignored
-    return static_cast<uint8_t>(dot4fv(vec4(color.x, color.y, color.z, 1.0), conv) * 255);
-}
- 
- 
-void rgb2yuv420p(uint8_t* rgb, uint8_t* yuv_buffer, uvec2 size) {
-    uint32_t u_start = size.x * size.y;
- 
-    float s = size.x / 4.;
-    uint32_t i    = 0; // y pos
-    uint32_t upos = u_start;
-    uint32_t vpos = (u_start + u_start / 4); //upos + upos / 4;
-    uint8_t r, g, b;    
- 
-    for (uint32_t line = 0; line < size.y; line++) {
-      if (!(line % 2) ) {
-          for (uint32_t x = 0; x < size.x; x += 2) {
-              r = rgb[NR_COLORS * i + 0];
-              g = rgb[NR_COLORS * i + 1];
-              b = rgb[NR_COLORS * i + 2];
-              yuv_buffer[i++] = ((66*r + 129*g + 25*b) >> 8) + 16;
- 
-              yuv_buffer[upos++] = ((-38*r + -74*g + 112*b) >> 8) + 128;
-              yuv_buffer[vpos++] = ((112*r + -94*g + -18*b) >> 8) + 128;
- 
-              r = rgb[NR_COLORS * i];
-              g = rgb[NR_COLORS * i + 1];
-              b = rgb[NR_COLORS * i + 2];
- 
-              yuv_buffer[i++] = ((66*r + 129*g + 25*b) >> 8) + 16;
-          }
-      } else {
-          for (size_t x = 0; x < size.x; x += 1) {
-              r = rgb[NR_COLORS * i];
-              g = rgb[NR_COLORS * i + 1];
-              b = rgb[NR_COLORS * i + 2];
-              yuv_buffer[i++] = ((66*r + 129*g + 25*b) >> 8) + 16;
-          }
-      }
-    }  
-}
- 
- 
-const char* sksl = R"(  
-uniform float2 u_tex_size;
-uniform shader u_tex;
-
-float4 conversion_y = float4(0.25882352941, 0.50588235294, 0.09803921568, 0.06274509803);
-float4 conversion_u = float4(-0.14901960784, -0.29019607843, 0.43921568627, 0.50196078431);
-float4 conversion_v = float4(0.43921568627, -0.36862745098, -0.07058823529, 0.50196078431);
- 
-float2 index_to_position(float index, float2 size, float m) {
-    return float2(mod(index * m, size.x), floor((index * m) / size.x) * m);
-}
- 
-float4 main(float2 coords) {
-    
-    float2 size = float2(u_tex_size.xy);
-    float out_width = size.x + size.x / 2.;
-    float index = coords.x + (coords.y - 0.5) * out_width - 0.5;
-    
-    float ustart = size.x * size.y;
-    float vstart = (ustart + ustart / 4);
- 
-    float2 position;
-    float4 conv;    
- 
-    if (index < ustart) { 
-        position = index_to_position(index, size, 1.0);
-        conv = conversion_y;
-    } else if (index < vstart) { 
-        position = index_to_position(index - ustart, size, 2.0);
-        conv = conversion_u;
-    } else { 
-        position = index_to_position(index - vstart, size, 2.0);
-        conv = conversion_v;
-    }
-    
-    float4 color = u_tex.eval(position);
-    return float4(dot(float4(color.rgb, 1.0), conv));
-}
-)";
-
 struct ColorSettings {
     ColorSettings(sk_sp<SkColorSpace> colorSpace) {
         if (colorSpace == nullptr || colorSpace->isSRGB()) {
@@ -187,13 +93,64 @@ struct ColorSettings {
     GrGLenum pixFormat;
 };
 
+class Logger  : public skottie::Logger {
+public:
+    struct LogEntry {
+        SkString fMessage, fJSON;
+    };
 
-static void quit(GLFWwindow *window, int key, int scancode, int action, int mods) {
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
+    void log(skottie::Logger::Level lvl, const char message[], const char json[]) override {
+        auto& log = lvl == skottie::Logger::Level::kError ? fErrors : fWarnings;
+        log.push_back({ SkString(message), json ? SkString(json) : SkString() });
     }
-}
 
+    void report() const {
+        SkDebugf("Animation loaded with %zu error%s, %zu warning%s.\n",
+                    fErrors.size(), fErrors.size() == 1 ? "" : "s",
+                    fWarnings.size(), fWarnings.size() == 1 ? "" : "s");
+
+        const auto& show = [](const LogEntry& log, const char prefix[]) {
+            SkDebugf("%s%s", prefix, log.fMessage.c_str());
+            if (!log.fJSON.isEmpty())
+                SkDebugf(" : %s", log.fJSON.c_str());
+            SkDebugf("\n");
+        };
+
+        for (const auto& err : fErrors)   show(err, "  !! ");
+        for (const auto& wrn : fWarnings) show(wrn, "  ?? ");
+    }
+
+private:
+    std::vector<LogEntry> fErrors,
+                            fWarnings;
+};
+
+
+
+class TypefaceProvider final : public skresources::ResourceProviderProxyBase {
+public:
+    explicit TypefaceProvider(sk_sp<skresources::ResourceProvider> rp)
+        : INHERITED(std::move(rp)) {}
+
+
+    sk_sp<SkTypeface> loadTypeface(const char* fontName, const char* styleName) const override {
+        // std::cout << "Getting typeface: " << fontName << " style: " << styleName << std::endl;
+        std::string font{fontName};
+        if (fonts.count(font) == 0) {
+            return nullptr;
+        }
+        return fonts.at(font);
+    }
+
+    void registerTypeface(const char* fontName, sk_sp<SkTypeface> typeface) {
+        fonts[std::string(fontName)] = typeface;
+    }
+private:
+    std::map<std::string, sk_sp<SkTypeface>> fonts;
+
+    using INHERITED = skresources::ResourceProviderProxyBase;
+};
+ 
 
 sk_sp<GrDirectContext> MakeGrContext() {
     auto interface = GrGLMakeNativeInterface();
@@ -227,8 +184,52 @@ sk_sp<SkSurface> MakeOnScreenGLSurface(sk_sp<GrDirectContext> dContext, int widt
 }
 
 
-int main()
-{
+int fontSize = 0;
+int boxWidth = 0;
+int boxHeight = 0;
+int lineHeight = 0;
+int iteration = 0;
+int vAlign = 0;
+int hAlign = 0;
+int resize = 0;
+int color = 0;
+
+void GLFWKeyboardEventCallback(GLFWwindow* window,  int key, int scancode, int action, int mods) {
+  if (action == GLFW_PRESS) {
+    switch(key) {
+      case GLFW_KEY_A: fontSize--; break;
+      case GLFW_KEY_S: fontSize++; break;
+      case GLFW_KEY_Q: boxWidth++; break; 
+      case GLFW_KEY_W: boxWidth--; break;
+      case GLFW_KEY_E: boxHeight++; break; 
+      case GLFW_KEY_R: boxHeight--; break;
+      case GLFW_KEY_Z: lineHeight++; break;
+      case GLFW_KEY_X: lineHeight--; break;
+      case GLFW_KEY_RIGHT: iteration++; break;
+      case GLFW_KEY_LEFT: iteration--; break;
+      case GLFW_KEY_UP: vAlign++; break;
+      case GLFW_KEY_DOWN: hAlign++; break;
+      case GLFW_KEY_P: resize++; break;
+      case GLFW_KEY_C: color++; break;
+    }
+  }
+
+  if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+    glfwSetWindowShouldClose(window, GLFW_TRUE);
+  }
+}
+
+
+std::string remove_r(const char* str, int size) {
+    std::string s;
+    for (int i = 0; i < size; i++) {
+        s += str[i] == '\r' ? ' ' : str[i];
+    }
+    return s;
+}
+
+
+int main(int argc, char *argv[]) {
     glfwInit();
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -236,142 +237,285 @@ int main()
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
-
     glfwWindowHint(GLFW_RED_BITS, 8);
     glfwWindowHint(GLFW_GREEN_BITS, 8);
     glfwWindowHint(GLFW_BLUE_BITS, 8);
     glfwWindowHint(GLFW_ALPHA_BITS, 8);
     glfwWindowHint(GLFW_STENCIL_BITS, 8);
-    
 
-    GLFWmonitor* monitor = nullptr; 
-    // if (fullscreen) {
-    //     monitor = glfwGetPrimaryMonitor();
-    //     const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-    //     width = mode->width;
-    //     height = mode->height;
-    // }
-
+    GLFWmonitor* monitor = nullptr;
     GLFWwindow *window = glfwCreateWindow(width, height, "GLFW OpenGL", monitor, NULL);
     glfwMakeContextCurrent(window);
-
-    int out_width = width + width / 2;
+    glfwSetKeyCallback(window, GLFWKeyboardEventCallback);
+    
 
     sk_sp<GrDirectContext> grContext = MakeGrContext();
-    auto surfaceImageInfo = SkImageInfo::Make(
-        out_width, 
-        height, 
-        kR8_unorm_SkColorType, 
-        SkAlphaType::kPremul_SkAlphaType,
-        SkColorSpace::MakeSRGB()
-    );
-    sk_sp<SkSurface> surface = SkSurface::MakeRenderTarget(
-        grContext.get(),  
-        SkBudgeted::kNo,
-        surfaceImageInfo,
-        1,
-        nullptr
-    );
-
-    // sk_sp<SkSurface> surface = MakeOnScreenGLSurface(grContext, width, height, nullptr);
+    sk_sp<SkSurface> surface = MakeOnScreenGLSurface(grContext, width, height, nullptr);
     SkCanvas* canvas = surface->getCanvas();
 
-    uvec2 size = uvec2(width, height);
-    uint32_t yuv_size = (width * height * 3) / 2;
- 
-    uint8_t* image = (uint8_t*)malloc(width * height * 4);    
-    for (int i = 0; i < width * height; i++) {
-        image[i*4+0] = std::rand() % 255;
-        image[i*4+1] = std::rand() % 255;
-        image[i*4+2] = std::rand() % 255;
-        image[i*4+3] = 255;
-    }
-
-    uint8_t* yuv1 = (uint8_t*)malloc(yuv_size);
-    uint8_t* yuv2 = (uint8_t*)malloc(yuv_size);
+    auto logger = sk_make_sp<Logger>();
+    auto weight = SkFontStyle::kNormal_Weight;
+    auto slant  = SkFontStyle::kUpright_Slant;
+    auto style = SkFontStyle(weight, SkFontStyle::kNormal_Width, slant);
     
-    rgb2yuv420p(image, yuv1, size);
- 
-    for (int i = 0; i < yuv_size; i++) {
-        yuv2[i] = rgb2yuv_gpu(i, size, image);
-        if (std::abs(yuv2[i] - yuv1[i]) > 1) {
-            std::cout << "Not close enough" << std::endl;
-            exit(1);
-        }
+    // SkFontStyleSet styleSet = SkFontMgr::RefDefault()->createStyleSet(0);
+    class NullResourceProvider final : public skottie::ResourceProvider {
+        sk_sp<SkData> load(const char[], const char[]) const override { return nullptr; }
+    };
+    auto resource_provider = sk_make_sp<TypefaceProvider>(sk_make_sp<NullResourceProvider>());
+
+
+    std::vector<sk_sp<SkTypeface>> typefaces;
+    for (const auto & entry : std::filesystem::directory_iterator("fonts/")) {
+        sk_sp<SkTypeface> typeface = SkFontMgr::RefDefault()->makeFromFile(entry.path().c_str());
+        SkString familyName;
+        typeface->getFamilyName(&familyName);
+        // std::cout << entry.path().c_str() << " " << familyName.c_str() << std::endl;
+        resource_provider->registerTypeface(familyName.c_str(), typeface);
+        typefaces.push_back(typeface);
     }
 
-    // const SkImageInfo& info, void* pixels, size_t rowBytes
-    SkImageInfo info = SkImageInfo::Make(
-        width, 
-        height, 
-        kRGBA_8888_SkColorType, 
-        SkAlphaType::kPremul_SkAlphaType,
-        SkColorSpace::MakeSRGB()
+    auto mgr = std::make_unique<skottie_utils::CustomPropertyManager>(
+        skottie_utils::CustomPropertyManager::Mode::kCollapseProperties, 
+        ""
     );
-
-    SkBitmap bitmap;
-    bitmap.installPixels(info, image, width * 4);
-    sk_sp<SkImage> img = SkImage::MakeFromBitmap(bitmap);
-    sk_sp<SkShader> imageShader = img->makeShader(SkSamplingOptions(SkFilterMode::kNearest));
     
-    auto [effect, err] = SkRuntimeEffect::MakeForShader(SkString(sksl));
+
+    uint32_t flags = 0;
+    if (false) {
+        flags |= skottie::Animation::Builder::kPreferEmbeddedFonts;
+    }
+    skottie::Animation::Builder builder(flags);
+    builder.setLogger(logger);
+    builder.setResourceProvider(resource_provider);
+    builder.setPropertyObserver(mgr->getPropertyObserver());
+    builder.setMarkerObserver(mgr->getMarkerObserver());
+
+    for(auto& m: mgr->markers()) {
+        // std::cout << "Marker: " << m.name << " [" << m.t0 << "," << m.t1 << "]" << std::endl; 
+    }
     
-    std::cout << "Error: " << err.c_str() << std::endl;
-    SkRuntimeEffect::ChildPtr children[] = { imageShader };
-    auto t0 = high_resolution_clock::now();
+    std::string fPath;
+    if (argc == 1) {
+        fPath = "lotties/06_Flicker/data.json";
+    } else {
+        fPath = std::string("lotties/") + std::string(argv[1]) + std::string("/data.json");
+    }
+   
 
-    SkPaint paint;
-    vec2 uniforms = vec2(width, height);
-    sk_sp<SkData> uniformData = SkData::MakeWithCopy(&uniforms, sizeof(uniforms));
-    paint.setShader( effect->makeShader(std::move(uniformData), { children, 1 }));
+    std::cout << "Loading: " << fPath << std::endl;
+    auto fAnimation = builder.makeFromFile(fPath.c_str());
+    auto fAnimationStats = builder.getStats();
+    float animationWidth = fAnimation->size().fWidth;
+    float animationHeight = fAnimation->size().fHeight;
+
     
-    canvas->drawPaint(paint);
-    surface->flush();
-
-    SkBitmap readBackBitmap;
-    readBackBitmap.allocPixels(surfaceImageInfo);
-    surface->readPixels(readBackBitmap, 0, 0);
-    uint8_t* d = static_cast<uint8_t*>(readBackBitmap.getPixels());
-
-    int nc = 1;
-    for(int i = 0; i < yuv_size / 4; i++) {
-        std::cout << i * 4 << ": ";
-
-        
-        for (int j = 0; j < 4; j++) {
-            int r = (i * 4 + j) * nc;
-            std::cout << "(" << +d[r] << " " << +yuv1[i * 4 + j] << " " << +yuv2[i * 4 + j] << ") ";
-            // std::cout << "Other values: " << +d[r + 0] << " " << +d[r + 1] << " " << +d[r + 2] << " " << +d[r + 3] << std::endl;
-            if (std::abs(d[r] - yuv1[i * 4 + j]) > 2 || std::abs(d[r] - yuv2[i * 4 + j]) > 2) {
-                
-                std::cout << "Other values: " << +d[r + 0] << " " << +d[r + 1] << " " << +d[r + 2] << " " << +d[r + 3] << std::endl;
-                std::cout << "Not close enough, exiting";
-                exit(1);
-            }
-        }
-        std::cout << std::endl;
+    
+    if (fAnimation) {
+        fAnimation->seek(0);
+        SkDebugf("Loaded Bodymovin animation v: %s, size: [%f %f]\n",
+                 fAnimation->version().c_str(),
+                 fAnimation->size().width(),
+                 fAnimation->size().height());
+        logger->report();
+    } else {
+        SkDebugf("failed to load Bodymovin animation: %s\n", fPath.c_str());
+        exit(1);
     }
 
-    // glfwSetKeyCallback(window, quit);
-    // int count = 0;
-    // while (!glfwWindowShouldClose(window)) {
-    //     glfwPollEvents();
-    //     canvas->save();
-    //     canvas->clear(0x00000000);
-    //     auto t0 = high_resolution_clock::now();
-    //     // float scale =  8.f + std::sin(count / 200.f) * 8.f;
-    //     // canvas->scale(scale, scale);
-    //     SkPaint paint;
-    //     paint.setShader( effect->makeShader(SkData::MakeWithCopy(uniforms, 8), {children, 1}));
-    //     surface->getCanvas()->drawPaint(paint);
-    //     surface->flush();
-    //     auto t1 = high_resolution_clock::now();
-    //     // std::cout << duration_cast<microseconds>(t1 - t0).count() << std::endl;
-    //     glfwSwapBuffers(window);
-    //     canvas->restore();
-    //     count++;
-    // }
+    skia::textlayout::TextStyle tstyle;
+    SkPaint ppaint;
+    ppaint.setColor4f(SkColor4f::FromBytes_RGBA(0xff0000ff));
+    tstyle.setForegroundColor(ppaint);
+    // tstyle.setFontFamilies({SkString("")});
+    tstyle.setFontSize(30);
+    skia::textlayout::ParagraphStyle paraStyle;
+    paraStyle.setTextStyle(tstyle);
+    
 
+    auto collection = sk_make_sp<skia::textlayout::FontCollection>();
+    collection->setDefaultFontManager(SkFontMgr::RefDefault());
+    auto pb = skia::textlayout::ParagraphBuilderImpl::make(paraStyle, collection);
+    pb->addText("Hello this is SkParagraph;");
+    auto paragraph = pb->Build();
+    paragraph->layout(2000.0);
+    auto paragraphPainter = new skia::textlayout::CanvasParagraphPainter(canvas);
+
+    
+    auto lr = paragraph->getTightLineBounds(0);
+
+    int count = 0;
+    canvas->resetMatrix();
+
+    const auto dstR = SkRect::MakeLTRB(0, 0, width, height);
+
+    int fCurrentFrame = 0;
+
+    SkRect outline;
+    skottie::TextPropertyValue initialValues;
+    std::cout << "num: " << mgr->getTextProps().size() << std::endl;
+    for (const auto& cp : mgr->getTextProps()) {
+        initialValues = mgr->getText(cp);
+        printf("text: %s \n", remove_r(initialValues.fText.c_str(), initialValues.fText.size()).c_str());
+        outline = initialValues.fBox;
+        vAlign = static_cast<int>(initialValues.fVAlign);
+        hAlign = static_cast<int>(initialValues.fHAlign);
+        break;
+    }
+
+    grContext->flushAndSubmit(true);
+    glfwSwapBuffers(window);
+    canvas->resetMatrix();
+
+    std::vector<uint32_t> colors = { 0xff000000, 0xff12abcc, 0xffff0000, 0xfff0ffdd};
+
+    SkFont font = SkFont(typefaces[0]);
+    // font.setBaselineSnap(false);
+    // font.setSubpixel(true);
+    font.setLinearMetrics(true);
+
+    
+
+
+
+    sk_sp<SkTextBlob> textBlob = SkTextBlob::MakeFromString("This is a textblob", font);
+
+    bool hasText = true;
+    std::cout << "Subpixel: " << font.isSubpixel() << std::endl;
+    bool drawParagraph = true;
+    
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+        double time = glfwGetTime();
+        
+        canvas->clear(SkColor4f::FromBytes_RGBA(0xffffffff));
+        // canvas->clear(SkColor4f::FromBytes_RGBA(0xff));
+        SkPaint paint;
+        SkPoint anchorPoint;
+
+        if (drawParagraph) {
+            canvas->save();
+
+            canvas->translate(200, 200);
+            SkPaint bgPaint;
+            bgPaint.setColor4f(SkColor4f::FromBytes_RGBA(0xffff00ff));
+
+
+            canvas->drawRect(lr, bgPaint);
+            paragraph->paint(paragraphPainter, 0, 0);
+            
+            // canvas->translate(-200, -200);
+            canvas->restore();
+
+            // canvas->save();
+            // canvas->scale(1.6, 1.6);
+            // ppaint.setAntiAlias(true);
+            // SkPaint bg;
+            // bg.setAntiAlias(true);
+            // bg.setColor4f(SkColor4f::FromBytes_RGBA(0x33ff0099));
+
+            // float y = 100 ;
+            // float x = 100;// + time * 2.0;
+            // canvas->translate(0, time * 2.0);
+            
+            // canvas->drawRect(SkRect::MakeLTRB(x - 20, y - 20, x, y), bg);
+            // ppaint.setDither(true);
+            // canvas->drawTextBlob(textBlob, x, y, ppaint);
+            // canvas->restore();
+        }
+        
+
+        // if (hasText) {
+        //     for (const auto& cp: mgr->getTransformProps()) {
+        //         auto t = mgr->getTransform(cp);
+        //         mgr->setTransform(cp, t);
+        //         anchorPoint = t.fAnchorPoint;
+        //         break;
+        //     }
+
+        //     for (const auto& cp: mgr->getOpacityProps()) {
+        //         auto t = mgr->getOpacity(cp);
+        //         mgr->setOpacity(cp, 100.f);
+        //         break;
+        //     }
+
+        //     for (const auto& cp: mgr->getColorProps()) {
+        //         auto t = mgr->getColor(cp);
+        //         mgr->setColor(cp, colors[color % colors.size()]);
+        //         break;
+        //     }
+        //     for (const auto& cp : mgr->getTextProps()) {
+        //         auto t = mgr->getText(cp);
+        //         t.fTypeface = typefaces[iteration % typefaces.size()];  
+        //         t.fTextSize = initialValues.fTextSize + fontSize * 10;
+        //         // t.fLineHeight = initialValues.fLineHeight + lineHeight * 8;
+        //         t.fLineHeight = initialValues.fLineHeight + fontSize * 10 + lineHeight * 8;
+        //         t.fHasStroke = true;
+        //         t.fStrokeColor = SkColor(0xffff0000);
+        //         t.fVAlign = static_cast<skottie::Shaper::VAlign>(vAlign % 5);
+        //         t.fHAlign = static_cast<SkTextUtils::Align>(hAlign % 3);
+        //         t.fResize = static_cast<skottie::Shaper::ResizePolicy>(resize % 3);
+
+        //         t.fFillColor = colors[color % colors.size()];
+                
+        //         // t.fStrokeWidth = iteration;
+        //         t.fPaintOrder = skottie::TextPaintOrder::kStrokeFill;
+
+        //         float widthChange = boxWidth * 40.f;
+        //         float heightChange = boxHeight * 40.f;
+        //         float newWidth = initialValues.fBox.width() + widthChange; 
+        //         float newHeight = initialValues.fBox.height() + heightChange; 
+        //         t.fBox = SkRect::MakeXYWH(initialValues.fBox.x() - widthChange / 2.f, initialValues.fBox.y() - heightChange / 2.f, newWidth, newHeight);  
+            
+        //         outline = t.fBox;
+        //         mgr->setText(cp, t);
+        //     }
+
+        //     SkPaint outlinePaint;
+        //     canvas->save();
+        //     float sx = height / animationWidth;
+        //     float sy = height / animationHeight;
+        //     canvas->translate(width / 2 - anchorPoint.fX * sx, height / 2 - anchorPoint.fY * sy);
+        //     canvas->scale(sx, sy);
+        //     outlinePaint.setARGB(100, 100, 100, 100);
+        //     canvas->drawRect(outline, outlinePaint);
+        //     canvas->restore();
+        // }
+        
+        // fAnimation->seekFrameTime(std::fmod(time, fAnimation->duration()), nullptr);
+        // auto flags = skottie::Animation::RenderFlag::kDisableTopLevelClipping | skottie::Animation::RenderFlag::kSkipTopLevelIsolation;
+        // fAnimation->render(canvas, &dstR, flags);
+        // fCurrentFrame++;
+        
+        canvas->flush();        
+        grContext->flushAndSubmit(true);
+        glfwSwapBuffers(window);
+        count++;
+    }
+
+    
     glfwDestroyWindow(window);
     glfwTerminate();
 }
+
+
+//   int currentIteration = static_cast<int>(time / fAnimation->duration());
+//         if (currentIteration > iteration) {
+//             for (const auto& cp : mgr->getTextProps()) {
+//                 auto t = mgr->getText(cp);
+//                 // t.fTextSize *= 1.f + (count % 200) / 5.f;
+//                 t.fTypeface = typefaces[currentIteration % typefaces.size()];  
+                
+//                 iteration++;
+                
+//                 if (iteration % typefaces.size() == 0) {
+//                     t.fTextSize /= 2;
+//                     t.fResize =  skottie::Shaper::ResizePolicy::kScaleToFit;
+//                     t.fLineHeight /= 2.f;
+//                     std::cout << t.fMaxLines << std::endl;
+//                     t.fBox = SkRect::MakeXYWH(t.fBox.x() + t.fBox.width() / 4.0, t.fBox.y() - t.fBox.height() / 2.0, t.fBox.width() / 2.0, t.fBox.height() * 2.0 );  
+//                 }
+//                 outline = t.fBox;
+//                 mgr->setText(cp, t);
+//             }
+//         }
